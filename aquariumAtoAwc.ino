@@ -1,5 +1,5 @@
 //declare variables
-unsigned long waterChangeInterval = 43200000; // how often the water change should be executed - 12 hours
+unsigned long waterChangeInterval[3] = {604800000,86400000,43200000}; // how often the water change should be executed - weekly, daily, 2x a day
 unsigned long maxExportRuntime = 300000; //the max time the export pump should run - 5 minutes - peristaltic pumps move about 400 ml/min, and desired water change volume is 1.2 liters or 3 minutes
 unsigned long maxImportRuntime = 300000; //the max time the import pump should run - 5 minutes
 unsigned long maxAtoRuntime = 120000; //the max time the ato pump should run - 2 minutes
@@ -11,9 +11,11 @@ unsigned long errorPulseDuration = 75; //the length of time the ATO pump should 
 unsigned long errorPulseInterval = 120000;  //the time between ATO pump pulses when there is an error
 unsigned long lastDebounceTime = 0; //used for debouncing button presses
 unsigned long debounceDelay = 50; //length of debounce delay
-unsigned long lastSettingModeStart = 0; //last time the setting mode was started
-unsigned long settingModeLenth = 3000; //length of the setting mode
-unsigned long settingBlinkTime = 300;
+unsigned long lastSettingModeAction = 0; //last time the setting mode was started
+unsigned long settingModeLength = 3000; //length of the setting mode
+unsigned long modeBlinkDuration = 300;
+
+int mode = 1; //mode 0 is weekly water changes, mode 1 is daily (default), and mode 2 is 2x a day water changes
 
 bool errorPulseActive = false;
 bool waterChangeExportRunning = false;
@@ -57,22 +59,28 @@ void setup() {
 void loop() {
   updateDisplay();
   if(readButton()){
-    lastSettingModeStart = millis();
+    lastSettingModeAction = millis();
     settingModeActive = true;
   }
-  if(millis() > (lastSettingModeStart + settingModeLength)){
+  if(millis() > (lastSettingModeAction + settingModeLength)){
     settingModeActive = false;
   }
 
   if(settingModeActive){
-
+    if(readButton){
+      if(mode < 2){
+        mode++;
+      }
+      else{
+        mode = 0;
+      }
+    }
   }
 
-  //check for errors
-  if(errorCheck() || reservoirEmpty()){
+  if(errorCheck() || reservoirEmpty()){ //if there's an error call this function to pulse the ATO pump
     errorAlert(true);
   }
-  else {
+  else { 
     errorAlert(false);
   }
 
@@ -81,11 +89,11 @@ void loop() {
     startAto();
   }
   //check if ATO should be ended
-  if((highTarget() || overfilled() || errorCheck() || atoFault) && atoRunning){
+  if((highTarget() || errorCheck() || atoFault) && atoRunning){
     endAto();
   }
   //check if water change export should be started
-  if(!errorCheck() && !reservoirEmpty() && !exportFault && !importFault && !atoRunning && !waterChangeExportRunning && !waterChangeImportRunning && (millis() > (lastExportStart + waterChangeInterval))){
+  if(!errorCheck() && !reservoirEmpty() && !exportFault && !importFault && !atoRunning && !waterChangeExportRunning && !waterChangeImportRunning && (millis() > (lastExportStart + waterChangeInterval[mode]))){
     startWaterChangeExport();
   }
   //check if water change export should be ended
@@ -97,28 +105,9 @@ void loop() {
     }
   }
   //check if water change import should be ended
-  if((errorCheck() || overfilled() || importFault || highTarget()) && waterChangeImportRunning){
+  if((errorCheck() || importFault || highTarget()) && waterChangeImportRunning){
     endWaterChangeImport();
   }
-}
-
-void softReset(){
-  waterChangeExportRunning = false;
-  waterChangeImportRunning = false;
-  atoRunning = false;
-  atoFault = false;
-  exportFault = false;
-  importFault = false;
-  lastAtoStart = millis();
-  lastExportStart = millis();
-  lastImportStart = millis();
-  digitalWrite(atoPin, LOW);
-  digitalWrite(exportPumpPin, LOW);
-  digitalWrite(exportValvePin, LOW);
-  digitalWrite(importPumpPin, LOW);
-  digitalWrite(atoLedPin, LOW);
-  digitalWrite(waterChangeLedPin, LOW);
-  digitalWrite(errorLedPin, LOW);
 }
 
 bool highTarget(){
@@ -129,23 +118,32 @@ bool lowTarget(){
   return digitalRead(lowTargetPin);
 }
 
-bool overfilled(){
+bool errorCheck(){ //helper function to check all the critical errors at once
+  if(atoRuntimeError() || exportRuntimeError() || importRuntimeError() || highTargetError() || lowTargetError() || overfilled()){
+    return true;
+  }
+  else {
+    return false;
+  }
+}
+
+bool overfilled(){ //check if the sump has been overfilled
   return !digitalRead(overfillPin);
 }
 
-bool reservoirEmpty() {
-  return !digitalRead(lowReservoirPin);
-}
-
-bool errorCheck(){
-  //check if ATO pump has been running too long
+bool atoRuntimeError(){ //check if ATO pump has been running too long
   if (atoRunning && (millis() > (lastAtoStart + maxAtoRuntime))){
     atoFault = true;
     digitalWrite(atoPin, LOW);
     atoRunning = false;
     return true;
   }
-  // check if export pump has been running too long
+  else {
+    return false;
+  }
+}
+
+bool exportRuntimeError(){ //check if export pump has been running too long
   if (waterChangeExportRunning && (millis() > (lastExportStart + maxExportRuntime))){
     exportFault = true;
     digitalWrite(exportPumpPin, LOW);
@@ -153,23 +151,24 @@ bool errorCheck(){
     waterChangeExportRunning = false;
     return true;
   }
-  // check if import pump has been running too long
+  else {
+    return false;
+  }
+}
+
+bool importRuntimeError(){ //check if import pump has been running too long
   if (waterChangeImportRunning && (millis() > (lastImportStart + maxImportRuntime))){
     importFault = true;
     digitalWrite(importPumpPin, LOW);
     waterChangeImportRunning = false;
     return true;
   }
-  //check if there is an error with any of the level sensors
-  if(highTargetError() || lowTargetError() || overfilled()){
-    return true;
-  }
   else {
     return false;
   }
 }
-//check if the overfill sensor has been triggered, but the high target sensor has not
-bool highTargetError() {
+
+bool highTargetError() { //check if the overfill sensor has been triggered, but the high target sensor has not
   if(overfilled() && !highTarget()){
     return true;
   }
@@ -177,14 +176,18 @@ bool highTargetError() {
     return false;
   }
 }
-//check if the overfill or high target sensors have been triggered, but the low target sensor has not
-bool lowTargetError() {
+
+bool lowTargetError() { //check if the overfill or high target sensors have been triggered, but the low target sensor has not
   if((overfilled() || highTarget()) && !lowTarget()){
     return true;
   }
   else {
     return false;
   }
+}
+
+bool reservoirEmpty() { //check if the reservoir is empty - not a critical error, but prevents a waterchange
+  return !digitalRead(lowReservoirPin);
 }
 
 void startAto() {
@@ -242,7 +245,6 @@ void errorAlert(bool errorActive) {
       digitalWrite(atoPin, LOW);
       errorPulseActive = false;
     }
-    digitalWrite(errorLedPin, LOW);
   }
 }
 
@@ -276,12 +278,51 @@ void updateDisplay(){
         digitalWrite(waterChangeLedPin, LOW);
     }
 
-    if(errorActive){
+    if(errorCheck() || reservoirEmpty()){
       digitalWrite(errorLedPin, HIGH);
     }
     else {
       digitalWrite(errorLedPin, LOW);
     }
   }
+  else {
+    switch (mode){
+      case 0: //just the error light on when in setting mode for weekly water changes
+      digitalWrite(errorLedPin, HIGH);
+      digitalWrite(atoLedPin, LOW);
+      digitalWrite(waterChangeLedPin, LOW);
+      break;
+      
+      case 1: //error and ato light on for daily water changes
+      digitalWrite(errorLedPin, HIGH);
+      digitalWrite(atoLedPin, HIGH);
+      digitalWrite(waterChangeLedPin, LOW);
+      break;
 
+      case 2: //all three light son for 2x a day water changes
+      digitalWrite(errorLedPin, HIGH);
+      digitalWrite(atoLedPin, HIGH);
+      digitalWrite(waterChangeLedPin, HIGH);
+      break;
+    }
+  }
+}
+
+void softReset(){
+  waterChangeExportRunning = false;
+  waterChangeImportRunning = false;
+  atoRunning = false;
+  atoFault = false;
+  exportFault = false;
+  importFault = false;
+  lastAtoStart = millis();
+  lastExportStart = millis();
+  lastImportStart = millis();
+  digitalWrite(atoPin, LOW);
+  digitalWrite(exportPumpPin, LOW);
+  digitalWrite(exportValvePin, LOW);
+  digitalWrite(importPumpPin, LOW);
+  digitalWrite(atoLedPin, LOW);
+  digitalWrite(waterChangeLedPin, LOW);
+  digitalWrite(errorLedPin, LOW);
 }
